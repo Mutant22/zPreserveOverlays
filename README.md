@@ -4,4 +4,4 @@ Simple Union plugin for Gothic II Notr. Saves used overlays on player into APPLI
 Not throuthfully tested.
 Use at your own risk :)
 
-Created as VIsual Studio Union project. Not using new Union API.
+Based on new Union framework template: https://github.com/Patrix9999/union-plugin-template/
