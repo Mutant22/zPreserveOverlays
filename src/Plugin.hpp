@@ -1,22 +1,58 @@
 // This file is included separately for each engine version
 
 #include <WinBase.h>
+#include <Union/Hook.h>
 
-namespace GOTHIC_NAMESPACE 
+namespace GOTHIC_NAMESPACE {
+
+void __fastcall Impl_Hook_oCNpc_Archive(oCNpc* _this, void* vtable, zCArchiver& archiver);
+auto Hook_oCNpc_Archive = Union::CreateHook(SIGNATURE_OF(&oCNpc::Archive), &Impl_Hook_oCNpc_Archive, Union::HookType::Hook_Detours);
+void __fastcall Impl_Hook_oCNpc_Archive(oCNpc* _this, void* vtable, zCArchiver& archiver)
 {
+	if (_this && _this->IsAPlayer()) {
+		//Sometimes 1h overlay e.g. HUMANS_1HST3.MDS is loaded after shield overlay e.g. HUMANS_1HST2SH.MDS
+		//Allow reordering, by priority
 
-class OverlayHolder {
-	public:
-		void Clear() { overlays.clear(); }
-		void Add(const zSTRING& o) { overlays.push_back(o); }
-		void OnSave();
-		void OnLoad();
-		void OnUpdate();
-		void Apply();
+		//TODO: make reordering configurable, maybe by external from daedalus, or ini setting?
+		// Move these overlays if found to the end in this order
+		std::vector<zSTRING> specials = { "HUMANS_RAPIER_ST1.MDS", "HUMANS_RAPIER_ST2.MDS", "HUMANS_RAPIER_ST3.MDS", "HUMANS_1HST1SH.MDS", "HUMANS_1HST2SH.MDS", "HUMANS_1HST3SH.MDS", "HUM_2X2.MDS" };
+		std::vector<zSTRING> copy_vec;
 
-	private:
-		std::vector<zSTRING> overlays;
-};
+		//copy array to vector
+		for (int i = 0; i < _this->activeOverlays.GetNum(); ++i) {
+			copy_vec.push_back(_this->activeOverlays[i]);
+		}
+
+		// First, stable_partition to move non-specials to the front
+		auto it = std::stable_partition(copy_vec.begin(), copy_vec.end(), [&](const zSTRING& s) {
+			return std::find(specials.begin(), specials.end(), s) == specials.end();
+		});
+
+		// Then, reorder the specials at the back in the desired order
+		std::stable_sort(it, copy_vec.end(), [&](const zSTRING& a, const zSTRING& b) {
+			return std::find(specials.begin(), specials.end(), a) <
+				std::find(specials.begin(), specials.end(), b);
+		});
+
+		//copy vector to array
+		for (int i = 0; i < copy_vec.size(); ++i) {
+			_this->activeOverlays[i] = copy_vec[i];
+		}
+	}
+
+	//call original function
+    Hook_oCNpc_Archive(_this, vtable, archiver);
+}
+
+void __fastcall Impl_Hook_oCNpc_Unarchive(oCNpc* _this, void* vtable, zCArchiver& archiver);
+auto Hook_oCNpc_Unarchive = Union::CreateHook(SIGNATURE_OF(&oCNpc::Unarchive), &Impl_Hook_oCNpc_Unarchive, Union::HookType::Hook_Detours);
+void __fastcall Impl_Hook_oCNpc_Unarchive(oCNpc* _this, void* vtable, zCArchiver& archiver)
+{
+	if (_this->IsAPlayer()) {
+		Union::StringANSI::Format("Npc is player.\n", lpAppName, lpKeyName, ini.c_str(), ret ? "true":"false").StdPrintLine();
+	}
+	Hook_oCNpc_Unarchive(_this, vtable, archiver);
+}
 
 static bool GetPrivateProfileBoolA(const LPCSTR lpAppName, const LPCSTR lpKeyName, const bool nDefault)
 {
@@ -31,35 +67,7 @@ static bool GetPrivateProfileBoolA(const LPCSTR lpAppName, const LPCSTR lpKeyNam
 	return ret;
 }
 
-static zCArchiver* CreateArchiverWrite(zSTRING path)
-{
-    static bool saveGameToAnisValid = false;
-    static bool saveGameToAnsi;
-
-    if (!saveGameToAnisValid) {
-        saveGameToAnisValid = true;
-		saveGameToAnsi = GetPrivateProfileBoolA("GAME", "SaveGameToANSI", false);
-    }
-
-    zTArchiveMode mode = saveGameToAnsi ? zARC_MODE_ASCII : zARC_MODE_BINARY_SAFE;
-
-    zFILE* file = zfactory->CreateZFile(path);
-    file->DirCreate();
-    file->Create();
-    delete file;
-
-    return zarcFactory->CreateArchiverWrite(path, mode, 0, 0);
-}
-
-static zSTRING GetSavePath()
-{
-    zSTRING path = zoptions->GetDirString(DIR_ROOT);
-    path += zoptions->GetDirString(DIR_SAVEGAMES);
-    path += "current\\APPLIED_OVERLAYS.SAV";
-    return path;
-}
-
-void OverlayHolder::OnSave()
+/*void OverlayHolder::OnSave()
 {
 	//Sometimes 1h overlay e.g. HUMANS_1HST3.MDS is loaded after shield overlay e.g. HUMANS_1HST2SH.MDS
 	//Allow reordering, by priority
@@ -93,52 +101,10 @@ void OverlayHolder::OnSave()
 
     arc->Close();
     arc->Release();
-}
+}*/
 
-void OverlayHolder::OnLoad()
-{
-    Clear();
 
-    zCArchiver* arc = zarcFactory->CreateArchiverRead(GetSavePath(), 0);
-    if (!arc)
-        return;
 
-    //
-    int size = arc->ReadInt("SIZE");
-    for (int i = 0; i < size; i++)
-    {
-        zSTRING overlay = arc->ReadString("MDS");
-        Add(overlay);
-    }
-    //
-
-    arc->Close();
-    arc->Release();
-    Apply();
-}
-
-void OverlayHolder::OnUpdate()
-{
-    if (!player) {
-        return;
-    }
-
-    Clear();
-
-    for (int i = 0; i < player->activeOverlays.GetNum(); i++) {
-        Add(player->activeOverlays[i]);
-    }
-}
-
-void OverlayHolder::Apply()
-{
-    for (const zSTRING& overlay : overlays) {
-		Union::StringANSI::Format( "Applying player overlay: {}\n", overlay).StdPrintLine();
-        player->ApplyOverlay(overlay);
-    }
-}
-
-OverlayHolder g_overlays;
 
 	void Game_EntryPoint()
 	{
@@ -147,7 +113,7 @@ OverlayHolder g_overlays;
 
 	void Game_Init()
 	{
-		Union::StringANSI::Format("zPreserveOverlays.dll loaded.\n").StdPrintLine();
+		Union::StringANSI::Format("zPreserveOverlays2.dll loaded.\n").StdPrintLine();
 	}
 
 	void Game_Exit()
@@ -162,8 +128,7 @@ OverlayHolder g_overlays;
 
 	void Game_Loop()
 	{
-		//update overlays
-		g_overlays.OnUpdate();
+
 	}
 
 	void Game_PostLoop()
@@ -178,8 +143,7 @@ OverlayHolder g_overlays;
 
 	void Game_SaveBegin()
 	{
-		//save overlays
-    	g_overlays.OnSave();
+
 	}
 
 	void Game_SaveEnd()
@@ -194,8 +158,7 @@ OverlayHolder g_overlays;
 
 	void LoadEnd()
 	{
-		//restore overlays
-    	g_overlays.OnLoad();
+
 	}
 
 	void Game_LoadBegin_NewGame()
@@ -292,12 +255,12 @@ OverlayHolder g_overlays;
 	}*/
 
 
-	void __fastcall oCGame_MainWorld_Render(Union::Registers& reg);
+	/*void __fastcall oCGame_MainWorld_Render(Union::Registers& reg);
 	auto Partial_zCWorld_Render = Union::CreatePartialHook(reinterpret_cast<void*>(zSwitch(0x0063DC76, 0x0066498B, 0x0066BA76, 0x006C87EB)), &oCGame_MainWorld_Render);
 	void __fastcall oCGame_MainWorld_Render(Union::Registers& reg)
 	{
 		Game_Loop();
-	}
+	}*/
 
 	/*void __fastcall zCMenu_Render(zCMenu* self, void* vtable);
 	auto Hook_zCMenu_Render = Union::CreateHook(reinterpret_cast<void*>(zSwitch(0x004D0DA0, 0x004E14E0, 0x004DB270, 0x004DDC20)), &zCMenu_Render, Union::HookType::Hook_Detours);
@@ -307,14 +270,14 @@ OverlayHolder g_overlays;
 		Game_MenuLoop();
 	}*/
 
-	void __fastcall oCGame_WriteSaveGame(oCGame* self, void* vtable, int slot, zBOOL saveGlobals);
+	/*void __fastcall oCGame_WriteSaveGame(oCGame* self, void* vtable, int slot, zBOOL saveGlobals);
 	auto Hook_oCGame_WriteSaveGame = Union::CreateHook(reinterpret_cast<void*>(zSwitch(0x0063AD80, 0x00661680, 0x006685D0, 0x006C5250)), &oCGame_WriteSaveGame, Union::HookType::Hook_Detours);
 	void __fastcall oCGame_WriteSaveGame(oCGame* self, void* vtable, int slot, zBOOL saveGlobals)
 	{
 		Game_SaveBegin();
 		Hook_oCGame_WriteSaveGame(self, vtable, slot, saveGlobals);
 		Game_SaveEnd();
-	}
+	}*/
 
 	/*void __fastcall oCGame_LoadGame(oCGame* self, void* vtable, int slot, const zSTRING& levelPath);
 	auto Hook_oCGame_LoadGame = Union::CreateHook(reinterpret_cast<void*>(zSwitch(0x0063C070, 0x00662B20, 0x00669970, 0x006C65A0)), &oCGame_LoadGame, Union::HookType::Hook_Detours);
@@ -325,23 +288,23 @@ OverlayHolder g_overlays;
 		Game_LoadEnd_NewGame();
 	}*/
 
-	void __fastcall oCGame_LoadSaveGame(oCGame* self, void* vtable, int slot, zBOOL loadGlobals);
+	/*void __fastcall oCGame_LoadSaveGame(oCGame* self, void* vtable, int slot, zBOOL loadGlobals);
 	auto Hook_oCGame_LoadSaveGame = Union::CreateHook(reinterpret_cast<void*>(zSwitch(0x0063C2A0, 0x00662D60, 0x00669BA0, 0x006C67D0)), &oCGame_LoadSaveGame, Union::HookType::Hook_Detours);
 	void __fastcall oCGame_LoadSaveGame(oCGame* self, void* vtable, int slot, zBOOL loadGlobals)
 	{
 		Game_LoadBegin_SaveGame();
 		Hook_oCGame_LoadSaveGame(self, vtable, slot, loadGlobals);
 		Game_LoadEnd_SaveGame();
-	}
+	}*/
 
-	void __fastcall oCGame_ChangeLevel(oCGame* self, void* vtable, const zSTRING& levelpath, const zSTRING& startpoint);
+	/*void __fastcall oCGame_ChangeLevel(oCGame* self, void* vtable, const zSTRING& levelpath, const zSTRING& startpoint);
 	auto Hook_Game_Load_ChangeLevel = Union::CreateHook(reinterpret_cast<void*>(zSwitch(0x0063CD60, 0x00663950, 0x0066A660, 0x006C7290)), &oCGame_ChangeLevel, Union::HookType::Hook_Detours);
 	void __fastcall oCGame_ChangeLevel(oCGame* self, void* vtable, const zSTRING& levelpath, const zSTRING& startpoint)
 	{
 		Game_LoadBegin_ChangeLevel();
 		Hook_Game_Load_ChangeLevel(self, vtable, levelpath, startpoint);
 		Game_LoadEnd_ChangeLevel();
-	}
+	}*/
 
 	/*void __fastcall oCGame_TriggerChangeLevel(oCGame* self, void* vtable, const zSTRING& levelpath, const zSTRING& startpoint);
 	auto Hook_oCGame_TriggerChangeLevel = Union::CreateHook(reinterpret_cast<void*>(zSwitch(0x0063D480, 0x00664100, 0x0066AD80, 0x006C7AF0)), &oCGame_TriggerChangeLevel, Union::HookType::Hook_Detours);
