@@ -8,7 +8,7 @@ It implements two main features.
 ## Reordering active overlays
 
 Reorders oCNpc::activeOverlays for hero instance, when saving game (oCNpc::Archive), so the more precedent overlay is next time loaded last.
-It could maybe somehow cause issues, when someone has pointer for overlay string. Thats why zSTRING pointers in zCArray are reordered, and not created anew.
+I am not sure if some code holds pointer to zSTRING in array. Pointer would be valid, but the string value returned can be changed by reordering.
 
 Define ReorderOverlayList in mod.ini/Gothic.ini/SystemPack.ini
 

@@ -25,9 +25,8 @@ std::vector<std::string> GetIniOverlaysList(const char* section, const char* key
 		// Fallback
 		tmp = "GOTHIC.INI";
 	}
-	
 
-	// Get path to SystemPack.Ini
+	// Get path to mod ini configuration file
 	auto ini = std::string(NPath, len).append("\\system\\").append(tmp);
 	char ret_string[200];
 	DWORD ret = GetPrivateProfileStringA(section, key, "", ret_string, sizeof(ret_string), ini.c_str());
@@ -100,31 +99,44 @@ void __fastcall Impl_Hook_oCNpc_Archive(oCNpc* _this, void* vtable, zCArchiver& 
 		zCArray<zSTRING>& activeOverlays = _this->activeOverlays;
 		int numOverlays = activeOverlays.GetNum();
 
-		// In-place reordering: move specials to end in the order they appear in specials vector
-		// Strategy: for each special in order, find it in array and rotate it to its final position
-		int endPos = numOverlays; // Position where next special should go (working backwards)
+		// Temporary storage for found specials (in order they appear in specials vector)
+		zCArray<zSTRING> foundSpecials;
+		foundSpecials.AllocAbs(specials.size());
 
-		// Process specials in reverse order (so we can place them from back to front)
-		for (int s = specials.size() - 1; s >= 0; --s) {
-			// Find this special in the array
-			int foundAt = -1;
-			for (int i = 0; i < endPos; ++i) {
-				if (activeOverlays[i] == specials[s].c_str()) {
-					foundAt = i;
-					break;
+		// Mark which overlays are special (for quick lookup)
+		zCArray<bool> isSpecial;
+		isSpecial.AllocAbs(numOverlays);
+		for (int i = 0; i < numOverlays; ++i) {
+			isSpecial[i] = false;
+		}
+
+		// Find and collect specials in the order defined in specials vector
+		for (size_t s = 0; s < specials.size(); ++s) {
+			for (int i = 0; i < numOverlays; ++i) {
+				if (!isSpecial[i] && activeOverlays[i] == specials[s].c_str()) {
+					foundSpecials.Insert(activeOverlays[i]);
+					isSpecial[i] = true;
+					break; // Found this special, move to next
 				}
 			}
+		}
 
-			// If found, rotate it to position endPos-1
-			if (foundAt >= 0) {
-				--endPos;
-				// Rotate elements: move found element to endPos by swapping
-				zSTRING temp = activeOverlays[foundAt];
-				for (int i = foundAt; i < endPos; ++i) {
-					activeOverlays[i] = activeOverlays[i + 1];
+		// Rebuild array: non-specials first, then specials in order
+		int writePos = 0;
+
+		// First pass: copy non-special overlays
+		for (int i = 0; i < numOverlays; ++i) {
+			if (!isSpecial[i]) {
+				if (writePos != i) {
+					activeOverlays[writePos] = activeOverlays[i];
 				}
-				activeOverlays[endPos] = temp;
+				++writePos;
 			}
+		}
+
+		// Second pass: append found specials in order
+		for (int i = 0; i < foundSpecials.GetNum(); ++i) {
+			activeOverlays[writePos++] = foundSpecials[i];
 		}
 	}
 
