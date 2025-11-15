@@ -2,6 +2,7 @@
 
 #include <WinBase.h>
 #include <Union/Hook.h>
+#include <optional>
 
 namespace GOTHIC_NAMESPACE {
 
@@ -74,6 +75,29 @@ std::vector<std::string> GetIniOverlaysList(const char* section, const char* key
 		}
 	}
 	return result;
+}
+
+std::optional<int> GetIntFromParser(const zSTRING& symbol_name)
+{
+	zCParser* par = zCParser::GetParser();
+	if (!par) {
+		return {};
+	}
+
+	int index = par->GetIndex(symbol_name);
+	if (!index) {
+		return {};
+	}
+
+	zCPar_Symbol* sym = par->GetSymbol(index);
+	if (!sym) {
+		return {};
+	}
+
+	int value = 0;
+	sym->GetValue(value, 0);
+	Union::StringANSI::Format("zPreserveOverlays: Get value of symbol \"{0}\" from parser: {1}.\n", symbol_name, value).StdPrintLine();
+	return value;
 }
 
 
@@ -156,16 +180,18 @@ void __fastcall Impl_Hook_oCNpc_Unarchive(oCNpc* _this, void* vtable, zCArchiver
 		oCItem* lh = _this->GetEquippedRangedWeapon();
 		int mode = _this->GetWeaponMode();
 
-		//TODO: get ITEM_CROSSBOW and 2h_swd 2h_axe from parser
-		//parser;
-		int ITEM_CROSSBOW = (1 << 20);
-		int ITEM_2HD_SWD = (1 << 16);
-		int ITEM_2HD_AXE = (1 << 17);
+		//Get symbol values from parser
+		static std::optional<int> ITEM_CROSSBOW = GetIntFromParser("ITEM_CROSSBOW");
+		static std::optional<int> ITEM_2HD_SWD = GetIntFromParser("ITEM_2HD_SWD");
+		static std::optional<int> ITEM_2HD_AXE = GetIntFromParser("ITEM_2HD_AXE");
+		if (!ITEM_CROSSBOW || !ITEM_2HD_SWD || !ITEM_2HD_AXE) {
+			return;
+		}
 
 		if (mode == 4 // Is fight mode
 			&& lh && rh // valid pointer
-			&& (lh->flags & ITEM_CROSSBOW) && (lh->munition == 0) && (lh->range > 0) // hack: In G2Alternative, dual weapon is crossbow, with some range and not defined munition. It could maybe sometimes fuck the visuals up in another mod :)
-			&& ((rh->flags & ITEM_2HD_SWD) || (rh->flags & ITEM_2HD_AXE))) // right hand weapon is two handed sword or axe
+			&& (lh->flags & *ITEM_CROSSBOW) && (lh->munition == 0) && (lh->range > 0) // hack: In G2Alternative, dual weapon is crossbow, with some range and not defined munition. It could maybe sometimes fuck the visuals up in another mod :)
+			&& ((rh->flags & *ITEM_2HD_SWD) || (rh->flags & *ITEM_2HD_AXE))) // right hand weapon is two handed sword or axe
 		{
 			// It is probably dual weapon, on loading weapon stays on back
 			// Move visual from ZS_CROSSBOW (hero back) to ZS_LEFTHAND
