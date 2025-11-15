@@ -5,38 +5,126 @@
 
 namespace GOTHIC_NAMESPACE {
 
+std::vector<std::string> GetIniOverlaysList(const char* section, const char* key)
+{
+	std::vector<std::string> result;
+	TCHAR NPath[MAX_PATH];
+	// Returns Gothic directory.
+	int len = GetCurrentDirectory(MAX_PATH, NPath);
+
+	// Get -GAME:modname.ini from command line, and use it for retrieving Overlay List
+	zSTRING& cmdline = zoptions->commandline;
+	std::string tmp(cmdline.ToChar());
+	std::transform(tmp.begin(), tmp.end(), tmp.begin(), ::toupper);
+	size_t cmdline_pos_start = tmp.find("-GAME:");
+	size_t cmdline_pos_stop = tmp.find(".INI");
+	if (cmdline_pos_start != std::string::npos && cmdline_pos_stop != std::string::npos) {
+		tmp = std::string(tmp.data() + cmdline_pos_start + sizeof("-GAME:") - 1, tmp.data() + cmdline_pos_stop + sizeof(".INI") - 1);
+	}
+	else {
+		// Fallback
+		tmp = "GOTHIC.INI";
+	}
+	
+
+	// Get path to SystemPack.Ini
+	auto ini = std::string(NPath, len).append("\\system\\").append(tmp);
+	char ret_string[200];
+	DWORD ret = GetPrivateProfileStringA(section, key, "", ret_string, sizeof(ret_string), ini.c_str());
+	if (ret == 0) {
+		// Fallback 2
+		ini = std::string(NPath, len).append("\\system\\SystemPack.ini");
+		ret = GetPrivateProfileStringA(section, key, "", ret_string, sizeof(ret_string), ini.c_str());
+	}
+	if (ret) {
+		std::string str(ret_string);
+		std::transform(str.begin(), str.end(), str.begin(), ::toupper);
+
+		//Remove comments starting by # or ;
+		size_t comment_pos = str.find_first_of("#;");
+		if (comment_pos != std::string::npos) {
+			str.resize(comment_pos);
+		}
+
+		//Remove whitespace from start and back
+		// trim from left
+		const char* to_trim = " \t\n\r\f\v";
+		str.erase(0, str.find_first_not_of(to_trim));
+		// trim from right
+		str.erase(str.find_last_not_of(to_trim) + 1);
+
+		Union::StringANSI::Format("zPreserveOverlays: Get setting [{0}]:{1} from {2}, with value: {3}.\n", section, key, ini.c_str(), str.c_str()).StdPrintLine();
+
+		// Parse ret items into vector, items are separated by two spaces
+		size_t pos = 0;
+		while (pos < str.length()) {
+			size_t next = str.find("  ", pos); // Find two spaces
+			if (next == std::string::npos) {
+				// Last item
+				std::string item = str.substr(pos);
+				if (!item.empty()) {
+					result.push_back(item);
+				}
+				break;
+			}
+			std::string item = str.substr(pos, next - pos);
+			if (!item.empty()) {
+				result.push_back(item);
+			}
+			pos = next + 2; // Skip the two spaces
+		}
+	}
+	return result;
+}
+
+
 void __fastcall Impl_Hook_oCNpc_Archive(oCNpc* _this, void* vtable, zCArchiver& archiver);
 auto Hook_oCNpc_Archive = Union::CreateHook(SIGNATURE_OF(&oCNpc::Archive), &Impl_Hook_oCNpc_Archive, Union::HookType::Hook_Detours);
 void __fastcall Impl_Hook_oCNpc_Archive(oCNpc* _this, void* vtable, zCArchiver& archiver)
 {
-	if (_this && _this->IsAPlayer()) {
+	if (_this && _this->IsAPlayer() && archiver.InSaveGame()) {
+		//SAVING GAME
 		//Sometimes 1h overlay e.g. HUMANS_1HST3.MDS is loaded after shield overlay e.g. HUMANS_1HST2SH.MDS
-		//Allow reordering, by priority
+		//Allow reordering, by priority from ini settings
 
-		//TODO: make reordering configurable, maybe by external from daedalus, or ini setting?
 		// Move these overlays if found to the end in this order
-		std::vector<zSTRING> specials = { "HUMANS_RAPIER_ST1.MDS", "HUMANS_RAPIER_ST2.MDS", "HUMANS_RAPIER_ST3.MDS", "HUMANS_1HST1SH.MDS", "HUMANS_1HST2SH.MDS", "HUMANS_1HST3SH.MDS", "HUM_2X2.MDS" };
-		std::vector<zSTRING> copy_vec;
+		//[ZPRESERVEOVERLAYS]
+		//ReorderOverlaysList = HUMANS_RAPIER_ST1.MDS  HUMANS_RAPIER_ST2.MDS  HUMANS_RAPIER_ST3.MDS  HUMANS_1HST1SH.MDS  HUMANS_1HST2SH.MDS  HUMANS_1HST3SH.MDS  HUM_2X2.MDS  ;two spaces separated values
 
-		//copy array to vector
-		for (int i = 0; i < _this->activeOverlays.GetNum(); ++i) {
-			copy_vec.push_back(_this->activeOverlays[i]);
+		static std::vector<std::string> specials = GetIniOverlaysList("ZPRESERVEOVERLAYS", "ReorderOverlaysList");
+		if (specials.empty()) {
+			// setting missinig do nothing
+			Hook_oCNpc_Archive(_this, vtable, archiver);
+			return;
 		}
+		zCArray<zSTRING>& activeOverlays = _this->activeOverlays;
+		int numOverlays = activeOverlays.GetNum();
 
-		// First, stable_partition to move non-specials to the front
-		auto it = std::stable_partition(copy_vec.begin(), copy_vec.end(), [&](const zSTRING& s) {
-			return std::find(specials.begin(), specials.end(), s) == specials.end();
-		});
+		// In-place reordering: move specials to end in the order they appear in specials vector
+		// Strategy: for each special in order, find it in array and rotate it to its final position
+		int endPos = numOverlays; // Position where next special should go (working backwards)
 
-		// Then, reorder the specials at the back in the desired order
-		std::stable_sort(it, copy_vec.end(), [&](const zSTRING& a, const zSTRING& b) {
-			return std::find(specials.begin(), specials.end(), a) <
-				std::find(specials.begin(), specials.end(), b);
-		});
+		// Process specials in reverse order (so we can place them from back to front)
+		for (int s = specials.size() - 1; s >= 0; --s) {
+			// Find this special in the array
+			int foundAt = -1;
+			for (int i = 0; i < endPos; ++i) {
+				if (activeOverlays[i] == specials[s].c_str()) {
+					foundAt = i;
+					break;
+				}
+			}
 
-		//copy vector to array
-		for (int i = 0; i < copy_vec.size(); ++i) {
-			_this->activeOverlays[i] = copy_vec[i];
+			// If found, rotate it to position endPos-1
+			if (foundAt >= 0) {
+				--endPos;
+				// Rotate elements: move found element to endPos by swapping
+				zSTRING temp = activeOverlays[foundAt];
+				for (int i = foundAt; i < endPos; ++i) {
+					activeOverlays[i] = activeOverlays[i + 1];
+				}
+				activeOverlays[endPos] = temp;
+			}
 		}
 	}
 
@@ -48,63 +136,39 @@ void __fastcall Impl_Hook_oCNpc_Unarchive(oCNpc* _this, void* vtable, zCArchiver
 auto Hook_oCNpc_Unarchive = Union::CreateHook(SIGNATURE_OF(&oCNpc::Unarchive), &Impl_Hook_oCNpc_Unarchive, Union::HookType::Hook_Detours);
 void __fastcall Impl_Hook_oCNpc_Unarchive(oCNpc* _this, void* vtable, zCArchiver& archiver)
 {
-	if (_this->IsAPlayer()) {
-		Union::StringANSI::Format("Npc is player.\n", lpAppName, lpKeyName, ini.c_str(), ret ? "true":"false").StdPrintLine();
-	}
+	//LOADING GAME
+	//call original function
 	Hook_oCNpc_Unarchive(_this, vtable, archiver);
+	if (_this && _this->IsAPlayer()) {
+		oCItem* rh = (oCItem*)_this->GetRightHand();
+		oCItem* lh = _this->GetEquippedRangedWeapon();
+		int mode = _this->GetWeaponMode();
+
+		//TODO: get ITEM_CROSSBOW and 2h_swd 2h_axe from parser
+		//parser;
+		int ITEM_CROSSBOW = (1 << 20);
+		int ITEM_2HD_SWD = (1 << 16);
+		int ITEM_2HD_AXE = (1 << 17);
+
+		if (mode == 4 // Is fight mode
+			&& lh && rh // valid pointer
+			&& (lh->flags & ITEM_CROSSBOW) && (lh->munition == 0) && (lh->range > 0) // hack: In G2Alternative, dual weapon is crossbow, with some range and not defined munition. It could maybe sometimes fuck the visuals up in another mod :)
+			&& ((rh->flags & ITEM_2HD_SWD) || (rh->flags & ITEM_2HD_AXE))) // right hand weapon is two handed sword or axe
+		{
+			// It is probably dual weapon, on loading weapon stays on back
+			// Move visual from ZS_CROSSBOW (hero back) to ZS_LEFTHAND
+			zCModel* model = _this->GetModel();
+			if (model) {
+				zCModelNodeInst* left_hand_node = model->SearchNode("ZS_LEFTHAND");
+				zCModelNodeInst* crossbow_node = model->SearchNode("ZS_CROSSBOW");
+				if (left_hand_node && crossbow_node) {
+					model->SetNodeVisual(left_hand_node, lh->visual, 0);
+					model->SetNodeVisual(crossbow_node, nullptr, 0);
+				}
+			}
+		}
+	}
 }
-
-static bool GetPrivateProfileBoolA(const LPCSTR lpAppName, const LPCSTR lpKeyName, const bool nDefault)
-{
-	TCHAR NPath[MAX_PATH];
-    // Returns Gothic directory.
-    int len = GetCurrentDirectory( MAX_PATH, NPath );
-    // Get path to SystemPack.Ini
-    auto ini = std::string( NPath, len ).append( "\\SystemPack.ini" );
-	bool ret = GetPrivateProfileIntA( lpAppName, lpKeyName, nDefault, ini.c_str() ) ? true : false;
-	Union::StringANSI::Format("zPreserveOverlays: Get setting {0}:{1} from {2}, with value: {3}.\n", lpAppName, lpKeyName, ini.c_str(), ret ? "true":"false").StdPrintLine();
-
-	return ret;
-}
-
-/*void OverlayHolder::OnSave()
-{
-	//Sometimes 1h overlay e.g. HUMANS_1HST3.MDS is loaded after shield overlay e.g. HUMANS_1HST2SH.MDS
-	//Allow reordering, by priority
-
-	//TODO: make reordering configurable, maybe by external from daedalus, or ini setting?
-	// Move these overlays if found to the end in this order
-	std::vector<zSTRING> specials = { "HUMANS_RAPIER_ST1.MDS", "HUMANS_RAPIER_ST2.MDS", "HUMANS_RAPIER_ST3.MDS", "HUMANS_1HST1SH.MDS", "HUMANS_1HST2SH.MDS", "HUMANS_1HST3SH.MDS", "HUM_2X2.MDS" };
-
-	// First, stable_partition to move non-specials to the front
-	auto it = std::stable_partition(overlays.begin(), overlays.end(), [&](const zSTRING& s) {
-		return std::find(specials.begin(), specials.end(), s) == specials.end();
-	});
-
-	// Then, reorder the specials at the back in the desired order
-	std::stable_sort(it, overlays.end(), [&](const zSTRING& a, const zSTRING& b) {
-		return std::find(specials.begin(), specials.end(), a) <
-			std::find(specials.begin(), specials.end(), b);
-	});
-
-	//create archiver
-    zCArchiver* arc = CreateArchiverWrite(GetSavePath());
-
-    //
-    arc->WriteInt("SIZE", overlays.size());
-
-    for (const zSTRING& overlay : overlays)
-    {
-        arc->WriteString("MDS", overlay);
-    }
-    //
-
-    arc->Close();
-    arc->Release();
-}*/
-
-
-
 
 	void Game_EntryPoint()
 	{
@@ -113,7 +177,7 @@ static bool GetPrivateProfileBoolA(const LPCSTR lpAppName, const LPCSTR lpKeyNam
 
 	void Game_Init()
 	{
-		Union::StringANSI::Format("zPreserveOverlays2.dll loaded.\n").StdPrintLine();
+		Union::StringANSI::Format("zPreserveOverlays.dll loaded.\n").StdPrintLine();
 	}
 
 	void Game_Exit()
